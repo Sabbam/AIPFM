@@ -1,3 +1,5 @@
+import os
+import google.generativeai as genai
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -6,17 +8,19 @@ from tensorflow import keras
 import matplotlib.pyplot as plt
 import seaborn as sns
 import joblib
-import requests
 from fpdf import FPDF
 from datetime import datetime
-import os
+import requests
+
+# Configure Gemini AI API Key
+genai.configure(api_key="AIzaSyC6vmcfzthKgnDu18c_DyK2le1qdFH9dUo")
 
 # Firebase Database URL
 FIREBASE_URL = "https://ai-manager-1086e-default-rtdb.firebaseio.com/users/{}.json"
 
 # Load Model & Scaler
-model = keras.models.load_model("model/spending_behavior_model.keras", compile=False)
-scaler = joblib.load("model/scaler.pkl")
+model = keras.models.load_model("spending_behavior_model.keras", compile=False)
+scaler = joblib.load("scaler.pkl")
 
 # Ensure directory exists
 def ensure_directory_exists(path):
@@ -85,14 +89,54 @@ def generate_bar_chart(user_id, category_data):
     plt.close()
     return chart_path
 
-# Provide spending insights based on scenarios
-def spending_analysis(category_data):
+# Provide spending insights based on scenarios using Gemini API
+def get_gemini_spending_insights(category_data, total_spending):
+    categories = ", ".join([f"{category}: {amount} INR" for category, amount in category_data.items()])
+    prompt = f"""
+    Based on the following spending categories and predicted savings, provide detailed financial advice:
+    Categories: {categories}
+    Predicted Savings: {total_spending} INR
+
+    Please analyze the data and provide insights on how to optimize spending, prioritize savings, and offer general financial advice.
+    """
+
+    # Create the model with generation config
+    generation_config = {
+      "temperature": 1,
+      "top_p": 0.95,
+      "top_k": 40,
+      "max_output_tokens": 8192,
+      "response_mime_type": "text/plain",
+    }
+
+    model = genai.GenerativeModel(
+      model_name="gemini-1.5-flash",
+      generation_config=generation_config,
+    )
+
+    chat_session = model.start_chat(
+      history=[]
+    )
+
+    # Send the message to Gemini
+    response = chat_session.send_message(prompt)
+    if response.text:
+        return response.text.strip()
+    else:
+        return "AI analysis failed. Please try again later."
+
+def spending_analysis(category_data, predicted_savings):
     insights = []
     total_spending = sum(category_data.values())
 
     if total_spending == 0:
         return "No spending data available."
 
+    # AI-driven insights for spending using Gemini
+    ai_insights = get_gemini_spending_insights(category_data, total_spending)
+    insights.append(f"AIPFM Insights: \n{ai_insights}\n")
+
+    # Add category-specific insights based on the percentages
     for category, amount in category_data.items():
         percentage = (amount / total_spending) * 100
 
@@ -103,12 +147,9 @@ def spending_analysis(category_data):
         elif percentage < 10:
             insights.append(f"Low allocation for {category}. Re-evaluating based on necessity and priority could be beneficial.")
 
-    if not insights:
-        insights.append("Your spending distribution is well-balanced. Excellent financial planning!")
-
     return "\n".join(insights)
 
-# Generate PDF report
+
 # Function to calculate spending grade and savings grade
 def calculate_grades(predicted_savings, total_income, total_spending):
     # Calculate Savings Grade
@@ -135,7 +176,7 @@ def calculate_grades(predicted_savings, total_income, total_spending):
     return savings_grade, spending_grade, spending_ratio
 
 # Updated function to generate the PDF report
-def generate_pdf_report(user_id, total_income, total_spending, predicted_savings, bar_chart_path, category_data, spending_advice, goal_amount, prediction_basis):
+def generate_pdf_report(user_id, total_income, total_spending, predicted_savings, bar_chart_path, category_data, spending_advice, goal_amount, prediction_basis, start_date, end_date):
     pdf = FPDF()
     pdf.add_page()
 
@@ -151,6 +192,7 @@ def generate_pdf_report(user_id, total_income, total_spending, predicted_savings
     pdf.cell(200, 10, txt=f"Total Income: INR {total_income}", ln=True)
     pdf.cell(200, 10, txt=f"Total Spending (Last 30 Days): INR {total_spending}", ln=True)
     pdf.cell(200, 10, txt=f"Goal Amount: INR {goal_amount}", ln=True)
+    pdf.cell(200, 10, txt=f"Date Range: {start_date} to {end_date}", ln=True)
     
     # Calculate grades and ratios
     savings_grade, spending_grade, spending_ratio = calculate_grades(predicted_savings, total_income, total_spending)
@@ -225,23 +267,33 @@ def main():
             expense_df = extract_expense_data(user_data)
 
             if not expense_df.empty:
-                st.write("### 🔍 Recent Expenses")
-                st.dataframe(expense_df[["date", "food", "entertainment", "transportation", "medicines", "clothing", "total_amount"]].sort_values(by="date", ascending=False))
+                # Date Range Picker for custom date selection
+                st.write("### 🔍 Select a Date Range for Total Spending")
+                start_date, end_date = st.date_input("Select Date Range", [expense_df["date"].min(), expense_df["date"].max()])
+                
+                # Filter the data based on the selected date range
+                filtered_df = expense_df[(expense_df["date"] >= pd.to_datetime(start_date)) & (expense_df["date"] <= pd.to_datetime(end_date))]
+
+                # Display filtered data
+                st.write("### 📝 Filtered Expenses")
+                st.dataframe(filtered_df[["date", "food", "entertainment", "transportation", "medicines", "clothing", "total_amount"]].sort_values(by="date", ascending=False))
+
+                # Recalculate total spending and income within the selected date range
+                category_data = {
+                    "Food": filtered_df["food"].sum(),
+                    "Entertainment": filtered_df["entertainment"].sum(),
+                    "Transportation": filtered_df["transportation"].sum(),
+                    "Medicines": filtered_df["medicines"].sum(),
+                    "Clothing": filtered_df["clothing"].sum()
+                }
 
                 # Generate and display bar chart
-                category_data = {
-                    "Food": expense_df["food"].sum(),
-                    "Entertainment": expense_df["entertainment"].sum(),
-                    "Transportation": expense_df["transportation"].sum(),
-                    "Medicines": expense_df["medicines"].sum(),
-                    "Clothing": expense_df["clothing"].sum()
-                }
                 chart_path = generate_bar_chart(user_id, category_data)
                 st.image(chart_path, caption="Spending Breakdown")
 
-                # Prepare the model input
-                total_income = expense_df["total_income"].max()
-                total_spending = expense_df["total_amount"].sum()
+                # Prepare the model input with filtered data
+                total_income = filtered_df["total_income"].max()
+                total_spending = filtered_df["total_amount"].sum()
                 input_data = [
                     total_income,          # total income
                     total_spending,       # total spending
@@ -258,8 +310,8 @@ def main():
                 predicted_savings = model.predict(scaled_input)[0][0]
 
                 # Automatically generate the PDF Report
-                spending_advice = spending_analysis(category_data)
-                goal_amount = expense_df["goal_amount"].max()
+                spending_advice = spending_analysis(category_data, predicted_savings)  # Fix: Pass predicted_savings
+                goal_amount = filtered_df["goal_amount"].max()
                 prediction_basis = (
                     "The predicted savings are based on the relationship between your current spending patterns "
                     "and your income. The model analyzes your spending across categories like food, entertainment, "
@@ -267,7 +319,7 @@ def main():
                 )
                 
                 # Generate the PDF report in real-time
-                pdf_path = generate_pdf_report(user_id, total_income, total_spending, predicted_savings, chart_path, category_data, spending_advice, goal_amount, prediction_basis)
+                pdf_path = generate_pdf_report(user_id, total_income, total_spending, predicted_savings, chart_path, category_data, spending_advice, goal_amount, prediction_basis, start_date, end_date)
                 
                 # Use Streamlit's download button for the user to download the PDF
                 with open(pdf_path, "rb") as f:
