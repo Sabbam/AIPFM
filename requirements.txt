@@ -1,0 +1,11 @@
+google-generativeai==<specific_version>  # You can specify a version if needed
+streamlit
+pandas
+numpy
+tensorflow
+keras
+seaborn
+matplotlib
+joblib
+fpdf
+requests
